@@ -281,6 +281,11 @@ class Request(Generic[sanic_type, ctx_type]):
                 response = await self.app._run_response_middleware(
                     self, response, middleware
                 )
+            # 策略响应钩子在既有蓝图/应用级响应中间件之后运行，
+            # 选择结果在请求进入时已固定，这里不会重新选版本。
+            response = await self.app.policy_manager.run_response(
+                self, response
+            )
         except CancelledErrors:
             raise
         except Exception:

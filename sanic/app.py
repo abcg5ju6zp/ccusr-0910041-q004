@@ -79,6 +79,7 @@ from sanic.models.futures import (
 )
 from sanic.models.handler_types import ListenerType, MiddlewareType
 from sanic.models.handler_types import Sanic as SanicVar
+from sanic.policies.executor import PolicyManager
 from sanic.request import Request
 from sanic.response import BaseHTTPResponse, HTTPResponse, ResponseStream
 from sanic.router import Router
@@ -155,6 +156,7 @@ class Sanic(
         "multiplexer",
         "named_request_middleware",
         "named_response_middleware",
+        "policy_manager",
         "repl_ctx",
         "request_class",
         "request_middleware",
@@ -319,6 +321,7 @@ class Sanic(
         self.listeners: dict[str, list[ListenerType[Any]]] = defaultdict(list)
         self.named_request_middleware: dict[str, deque[Middleware]] = {}
         self.named_response_middleware: dict[str, deque[Middleware]] = {}
+        self.policy_manager: PolicyManager = PolicyManager(self)
         self.repl_ctx: REPLContext = REPLContext()
         self.request_class = request_class or Request
         self.request_middleware: deque[Middleware] = deque()
@@ -853,6 +856,9 @@ class Sanic(
     ) -> None:  # no cov
         """项目内部接口说明。"""
         response = None
+        # 异常可能在 handle_request 之前（收包阶段）抛出；select 幂等，
+        # 已选择过的请求会复用进入时的同一版本。
+        self.policy_manager.select(request)
         if not getattr(exception, "__dispatched__", False):
             ...  # DO NOT REMOVE THIS LINE. IT IS NEEDED FOR TOUCHUP.
             await self.dispatch(
@@ -894,12 +900,23 @@ class Sanic(
                     "https://sanicframework.org/en/guide/advanced/"
                     "signals.html",
                 )
+            await self.policy_manager.complete(request, exception)
             return
+
+        # -------------------------------------------- #
+        # Policy exception hooks（与进入时同一版本）
+        # -------------------------------------------- #
+        if not response:
+            policy_response = await self.policy_manager.run_exception(
+                request, exception
+            )
+            if policy_response is not None:
+                response = policy_response
 
         # -------------------------------------------- #
         # Request Middleware
         # -------------------------------------------- #
-        if run_middleware:
+        if run_middleware and not response:
             try:
                 middleware = (
                     request.route and request.route.extra.request_middleware
@@ -939,6 +956,7 @@ class Sanic(
                 if request.stream:
                     request.stream.respond(response)
                 await response.send(end_stream=True)
+                await self.policy_manager.complete(request, exception)
                 raise
         else:
             if request.stream:
@@ -956,6 +974,7 @@ class Sanic(
                 },
             )
             await response.send(end_stream=True)
+            await self.policy_manager.complete(request, exception)
         elif isinstance(response, ResponseStream):
             resp = await response(request)
             await self.dispatch(
@@ -967,6 +986,7 @@ class Sanic(
                 },
             )
             await response.eof()
+            await self.policy_manager.complete(request, exception)
         else:
             raise ServerError(
                 f"Invalid response type {response!r} (need HTTPResponse)"
@@ -975,6 +995,10 @@ class Sanic(
     async def handle_request(self, request: Request) -> None:  # no cov
         """项目内部接口说明。"""
         __tracebackhide__ = True
+
+        # 版本选择在整个请求中只发生一次；后续异常处理与响应阶段
+        # 都复用这里得到的不可变选择结果，灰度调整/回退不影响在途请求。
+        self.policy_manager.select(request)
 
         await self.dispatch(
             "http.lifecycle.handle",
@@ -1039,6 +1063,11 @@ class Sanic(
                     request, request.route.extra.request_middleware
                 )
 
+            # 现有蓝图/应用级中间件顺序保持不变；选定版本的请求钩子
+            # 在既有中间件链之后执行，返回响应即短路到响应阶段。
+            if not response:
+                response = await self.policy_manager.run_request(request)
+
             # No middleware results
             if not response:
                 # -------------------------------------------- #
@@ -1093,6 +1122,7 @@ class Sanic(
                 )
                 ...
                 await response.send(end_stream=True)
+                await self.policy_manager.complete(request)
             elif isinstance(response, ResponseStream):
                 resp = await response(request)
                 await self.dispatch(
@@ -1104,6 +1134,7 @@ class Sanic(
                     },
                 )
                 await response.eof()
+                await self.policy_manager.complete(request)
             else:
                 if not hasattr(handler, "is_websocket"):
                     raise ServerError(

@@ -23,6 +23,13 @@ from sanic.exceptions import (
     ServiceUnavailable,
     Unauthorized,
 )
+from sanic.policies import (
+    PolicyManager,
+    PolicyRegistry,
+    PolicyVersion,
+    Rollout,
+    SelectionReason,
+)
 from sanic.request import Request
 from sanic.response import (
     HTTPResponse,
@@ -57,6 +64,12 @@ __all__ = (
     "HTTPResponse",
     "Request",
     "Websocket",
+    # Versioned request policies
+    "PolicyManager",
+    "PolicyRegistry",
+    "PolicyVersion",
+    "Rollout",
+    "SelectionReason",
     # Common types
     "DefaultSanic",
     "DefaultRequest",

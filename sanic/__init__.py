@@ -35,6 +35,15 @@ from sanic.response import (
     text,
 )
 from sanic.server.websockets.impl import WebsocketImplProtocol as Websocket
+from sanic.strategies import (
+    PolicyError,
+    PolicyRegistry,
+    PolicyState,
+    PolicyStrategy,
+    PolicyVersion,
+    SelectionReason,
+    StrategyDecision,
+)
 
 
 DefaultSanic: TypeAlias = "Sanic[Config, SimpleNamespace]"
@@ -60,6 +69,14 @@ __all__ = (
     # Common types
     "DefaultSanic",
     "DefaultRequest",
+    # Versioned policies
+    "PolicyError",
+    "PolicyRegistry",
+    "PolicyState",
+    "PolicyStrategy",
+    "PolicyVersion",
+    "SelectionReason",
+    "StrategyDecision",
     # Common exceptions
     "BadRequest",
     "ExpectationFailed",

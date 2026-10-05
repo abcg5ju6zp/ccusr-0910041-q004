@@ -84,6 +84,17 @@ from sanic.response import BaseHTTPResponse, HTTPResponse, ResponseStream
 from sanic.router import Router
 from sanic.server.websockets.impl import ConnectionClosed
 from sanic.signals import Event, Signal, SignalRouter
+from sanic.strategies import (
+    DEFAULT_OVERRIDE_HEADER,
+    DEFAULT_STRATEGY,
+    IdentityExtractor,
+    PolicyError,
+    PolicyRegistry,
+    PolicyStrategy,
+    StrategyDecision,
+    TenantExtractor,
+)
+from sanic.strategies.lifecycle import install_policy_support
 from sanic.touchup import TouchUp, TouchUpMeta
 from sanic.types.shared_ctx import SharedContext
 from sanic.worker.inspector import Inspector
@@ -139,6 +150,7 @@ class Sanic(
         "_future_statics",
         "_inspector",
         "_manager",
+        "_policy_registry",
         "_state",
         "_task_registry",
         "_test_client",
@@ -319,6 +331,7 @@ class Sanic(
         self.listeners: dict[str, list[ListenerType[Any]]] = defaultdict(list)
         self.named_request_middleware: dict[str, deque[Middleware]] = {}
         self.named_response_middleware: dict[str, deque[Middleware]] = {}
+        self._policy_registry: PolicyRegistry | None = None
         self.repl_ctx: REPLContext = REPLContext()
         self.request_class = request_class or Request
         self.request_middleware: deque[Middleware] = deque()
@@ -459,6 +472,103 @@ class Sanic(
                 if middleware not in self.named_response_middleware[_rn]:
                     self.named_response_middleware[_rn].appendleft(middleware)
         return retval
+
+    # ---------------------------------------------------------------- #
+    # Versioned policies
+    # ---------------------------------------------------------------- #
+
+    @property
+    def policy_registry(self) -> PolicyRegistry | None:
+        """策略注册表；尚未注册任何策略时为 ``None``。"""
+        return self._policy_registry
+
+    def _ensure_policy_registry(self) -> PolicyRegistry:
+        if self._policy_registry is None:
+            registry = PolicyRegistry()
+            self._policy_registry = registry
+            install_policy_support(self, registry)
+        return self._policy_registry
+
+    def add_policy_strategy(
+        self,
+        name: str = DEFAULT_STRATEGY,
+        *,
+        tenant_extractor: TenantExtractor | None = None,
+        identity_extractor: IdentityExtractor | None = None,
+        override_header: str | None = DEFAULT_OVERRIDE_HEADER,
+        allow_override: bool = False,
+    ) -> PolicyStrategy:
+        """注册一组可版本化的策略。
+
+        首次调用时惰性接入请求生命周期（最早的请求信号 + 最内层中间件），
+        不改变现有蓝图与应用级中间件的相对顺序。
+        """
+        registry = self._ensure_policy_registry()
+        return registry.add(
+            name,
+            tenant_extractor=tenant_extractor,
+            identity_extractor=identity_extractor,
+            override_header=override_header,
+            allow_override=allow_override,
+        )
+
+    def policy_strategy(
+        self, name: str = DEFAULT_STRATEGY
+    ) -> PolicyStrategy:
+        """获取已注册的策略组。"""
+        return self._ensure_policy_registry().get(name)
+
+    def add_policy_version(
+        self,
+        name: str,
+        payload: Any = None,
+        *,
+        strategy: str = DEFAULT_STRATEGY,
+        priority: int = 0,
+        rollout: float = 0.0,
+        fallback: bool = False,
+        exempt: bool = False,
+        tenants: "frozenset[str] | set[str] | None" = None,
+        enabled: bool = True,
+    ):
+        """在（按需创建的）策略组中注册一个版本。"""
+        registry = self._ensure_policy_registry()
+        try:
+            policy = registry.get(strategy)
+        except PolicyError:
+            policy = registry.add(strategy)
+        return policy.add_version(
+            name,
+            payload,
+            priority=priority,
+            rollout=rollout,
+            fallback=fallback,
+            exempt=exempt,
+            tenants=tenants,
+            enabled=enabled,
+        )
+
+    def rollback_policy(
+        self,
+        version: str | None = None,
+        *,
+        strategy: str = DEFAULT_STRATEGY,
+    ) -> None:
+        """立即回退某版本（或整组策略），对后续请求即时生效。
+
+        已经进入处理流程的请求继续使用进入时冻结的版本。
+        """
+        self._ensure_policy_registry().get(strategy).rollback(version)
+
+    def policy_decision(
+        self,
+        request: Request,
+        name: str = DEFAULT_STRATEGY,
+    ) -> StrategyDecision | None:
+        """读取本次请求冻结的策略决策（可能为 ``None``）。"""
+        if self._policy_registry is None:
+            return None
+        return self._policy_registry.decision_for(request, name)
 
     def _apply_exception_handler(
         self,
@@ -975,6 +1085,21 @@ class Sanic(
     async def handle_request(self, request: Request) -> None:  # no cov
         """项目内部接口说明。"""
         __tracebackhide__ = True
+
+        # 正常路径（HTTP/1、ASGI）在 http.lifecycle.request 信号中已完成
+        # 版本冻结；此处为不派发该信号的传输（如 HTTP/3）兜底，确保任何
+        # 入口下决策都早于路由、中间件与处理器完成。
+        if (
+            self._policy_registry is not None
+            and request._policy_decisions is None
+        ):
+            try:
+                await self._policy_registry.resolve(request)
+            except Exception:
+                error_logger.exception(
+                    "Failed to resolve request policy; continuing without "
+                    "a policy version"
+                )
 
         await self.dispatch(
             "http.lifecycle.handle",

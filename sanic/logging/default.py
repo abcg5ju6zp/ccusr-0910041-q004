@@ -32,6 +32,12 @@ LOGGING_CONFIG_DEFAULTS: dict[str, Any] = dict(  # no cov
             "propagate": True,
             "qualname": "sanic.websockets",
         },
+        "sanic.policy": {
+            "level": "INFO",
+            "handlers": ["console"],
+            "propagate": True,
+            "qualname": "sanic.policy",
+        },
     },
     handlers={
         "console": {

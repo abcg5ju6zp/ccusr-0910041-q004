@@ -96,6 +96,8 @@ class Request(Generic[sanic_type, ctx_type]):
         "_id",
         "_ip",
         "_parsed_url",
+        "_policy_decisions",
+        "_policy_request_hooks_done",
         "_port",
         "_protocol",
         "_remote_addr",
@@ -188,6 +190,10 @@ class Request(Generic[sanic_type, ctx_type]):
         self.stream: Stream | None = None
         self._match_info: dict[str, Any] = {}
         self._protocol: BaseProtocol | None = None
+        # 策略版本选择在请求进入时冻结一次，整个生命周期
+        # （中间件、处理器、异常处理、响应阶段）都读取同一份结果。
+        self._policy_decisions: Any = None
+        self._policy_request_hooks_done: bool = False
 
     def __repr__(self):
         class_name = self.__class__.__name__
